@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>מד צעדים חכם</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet"/>
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <link href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" rel="stylesheet"/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body.dark { background-color: #121212; color: #fff; }
+    body.light { background-color: #f8f9fa; color: #000; }
+    #map { height: 200px; margin-top: 1rem; border-radius: 10px; }
+    canvas { background: #fff; border-radius: 10px; }
+    .card { transition: 0.3s ease-in-out; }
+    .card:hover { transform: scale(1.02); }
+  </style>
+</head>
+<body class="dark">
+<div class="container py-4">
+  <h1 class="text-center mb-4">🚶 מד צעדים חכם</h1>
+
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="card p-3">
+        <h5>מספר צעדים: <span id="stepCount">0</span></h5>
+        <h5>מרחק מצטבר: <span id="distance">0</span> מ'</h5>
+        <h5>מהירות: <span id="speed">0</span> קמ"ש</h5>
+        <button class="btn btn-danger mt-3" id="stopBtn">עצור מדידה</button>
+        <button class="btn btn-warning mt-2" id="resetBtn">איפוס כל הנתונים</button>
+      </div>
+    </div>
+
+    <div class="col-md-4">
+      <div class="card p-3">
+        <label for="soundInterval">צליל כל כמה מטרים:</label>
+        <input type="number" id="soundInterval" class="form-control" min="10" step="10" value="100"/>
+        <button class="btn btn-primary mt-2" id="playTest">🔊 בדיקת צליל</button>
+        <audio id="stepSound" src="https://actions.google.com/sounds/v1/cartoon/wood_plank_flicks.ogg" preload="auto"></audio>
+      </div>
+    </div>
+
+    <div class="col-md-4">
+      <div class="card p-3">
+        <label>בחר מצב תצוגה:</label>
+        <select id="themeToggle" class="form-select">
+          <option value="dark">כהה</option>
+          <option value="light">בהיר</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div id="map" class="mt-4"></div>
+  <canvas id="distanceChart" class="w-100 my-3" height="150"></canvas>
+</div>
+
+<script>
+let steps = +localStorage.getItem("steps") || 0;
+let totalDistance = +localStorage.getItem("distance") || 0;
+let lastCoords = null;
+let lastTime = null;
+let isRunning = true;
+let distanceHistory = JSON.parse(localStorage.getItem("distanceHistory") || "[]");
+let soundInterval = +localStorage.getItem("soundInterval") || 100;
+let theme = localStorage.getItem("theme") || "dark";
+let chart = null;
+
+$('#stepCount').text(steps);
+$('#distance').text(totalDistance.toFixed(1));
+$('#soundInterval').val(soundInterval);
+$('body').removeClass().addClass(theme);
+$('#themeToggle').val(theme);
+
+$('#themeToggle').on('change', function () {
+  theme = $(this).val();
+  $('body').removeClass().addClass(theme);
+  localStorage.setItem("theme", theme);
+});
+
+$('#resetBtn').on('click', function () {
+  if (confirm("האם אתה בטוח שברצונך לאפס את כל הנתונים?")) {
+    localStorage.clear();
+    location.reload();
+  }
+});
+
+$('#playTest').on('click', function () {
+  $('#stepSound')[0].play();
+});
+
+$('#soundInterval').on('change', function () {
+  soundInterval = +$(this).val();
+  localStorage.setItem("soundInterval", soundInterval);
+});
+
+$('#stopBtn').on('click', function () {
+  isRunning = false;
+  alert("המדידה נעצרה.");
+});
+
+// צעדים ו־GPS
+if (window.DeviceMotionEvent) {
+  let stepBuffer = 0;
+  window.addEventListener('devicemotion', e => {
+    if (!isRunning) return;
+    let acc = e.accelerationIncludingGravity;
+    let magnitude = Math.sqrt(acc.x ** 2 + acc.y ** 2 + acc.z ** 2);
+    if (magnitude > 15) {
+      stepBuffer++;
+      if (stepBuffer > 5) {
+        steps++;
+        $('#stepCount').text(steps);
+        localStorage.setItem("steps", steps);
+        stepBuffer = 0;
+      }
+    }
+  });
+}
+
+navigator.geolocation.watchPosition(pos => {
+  if (!isRunning) return;
+
+  const { latitude, longitude } = pos.coords;
+  const now = new Date().getTime();
+  if (lastCoords) {
+    let d = calcDistance(lastCoords.lat, lastCoords.lng, latitude, longitude);
+    if (d > 1) {
+      totalDistance += d;
+      $('#distance').text(totalDistance.toFixed(1));
+      localStorage.setItem("distance", totalDistance);
+      distanceHistory.push({ time: now, distance: totalDistance });
+      localStorage.setItem("distanceHistory", JSON.stringify(distanceHistory));
+
+      // מהירות בקמ"ש
+      if (lastTime) {
+        let deltaSec = (now - lastTime) / 1000;
+        let speed = (d / deltaSec) * 3.6;
+        $('#speed').text(speed.toFixed(1));
+      }
+
+      // הפעלת צליל
+      if (Math.floor(totalDistance / soundInterval) > Math.floor((totalDistance - d) / soundInterval)) {
+        $('#stepSound')[0].play();
+      }
+    }
+  }
+  lastCoords = { lat: latitude, lng: longitude };
+  lastTime = now;
+  updateMap(latitude, longitude);
+  updateChart();
+}, err => {
+  alert("אין גישה ל־GPS");
+});
+
+// מרחק בין נקודות GPS
+function calcDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) *
+            Math.sin(dLon/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+// מפה
+let map = L.map('map').setView([31.7683, 35.2137], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+let userMarker = L.marker([31.7683, 35.2137]).addTo(map);
+function updateMap(lat, lng) {
+  map.setView([lat, lng], 16);
+  userMarker.setLatLng([lat, lng]);
+}
+
+// גרף
+function updateChart() {
+  let labels = distanceHistory.map(p => new Date(p.time).toLocaleTimeString());
+  let data = distanceHistory.map(p => p.distance.toFixed(1));
+  if (!chart) {
+    chart = new Chart(document.getElementById('distanceChart'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'מרחק מצטבר (מ׳)',
+          data: data,
+          borderColor: 'blue',
+          backgroundColor: 'rgba(0,0,255,0.1)',
+          tension: 0.4
+        }]
+      },
+      options: {
+        responsive: true,
+        animation: {
+          duration: 500
+        }
+      }
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].data = data;
+    chart.update();
+  }
+}
+</script>
+</body>
+</html>
